@@ -1,0 +1,44 @@
+# ============================================================================
+# PeopleHub - Git Ignore
+# ============================================================================
+
+# Environment files (KRUSIAL - jangan pernah commit)
+.env
+.env.local
+.env.*.local
+
+# Dependencies - managed by npm
+node_modules/
+
+# Build outputs
+dist/
+.next/
+build/
+out/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Prisma (untuk development, schema sudah di-commit)
+# migrations/  # Uncomment jika migration juga tidak mau di-commit
+
+# Temporary files
+*.tmp
+*.temp
+.cache/

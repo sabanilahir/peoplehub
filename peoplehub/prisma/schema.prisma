@@ -1,0 +1,840 @@
+// PeopleHub — HR engine terintegrasi Odoo
+// Konvensi:
+//  - Semua waktu = timestamptz (UTC). Tanggal kalender (workDate) = @db.Date.
+//  - Semua uang = Decimal.
+//  - Rule memakai effective dating (effectiveFrom/effectiveTo): perubahan = versi baru.
+//  - "// ASSUMPTION:" menandai keputusan yang masih [TERBUKA] di dokumen handover.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum LocationType {
+  HO
+  BRANCH
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum DataSource {
+  PEOPLEHUB
+  IMPORT
+  MANUAL
+  DEFAULT
+}
+
+enum ImportFileType {
+  TIME_ENTRY
+  SCHEDULE
+  LEAVE
+  CALENDAR
+  OVERTIME_PLAN
+  OVERTIME_REALIZATION
+}
+
+enum ImportStatus {
+  RECEIVED
+  VALIDATING
+  APPLIED
+  PARTIAL
+  FAILED
+}
+
+enum LogLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+enum DayType {
+  WORKDAY
+  OFFDAY
+}
+
+enum CalendarEventType {
+  PUBLIC_HOLIDAY
+  COLLECTIVE_LEAVE
+  BUSINESS_TRIP
+  TRAINING
+  COMPANY_EVENT
+}
+
+enum EventScope {
+  GLOBAL
+  LOCATION
+  EMPLOYEE
+}
+
+enum PunchSource {
+  FINGERPRINT
+  MANUAL
+  IMPORT
+}
+
+enum PunchDirection {
+  IN
+  OUT
+  UNKNOWN
+}
+
+enum AttendanceStatus {
+  PRESENT
+  LATE
+  ABSENT
+  ON_LEAVE
+  OFFDAY
+  HOLIDAY
+  INCOMPLETE
+}
+
+enum WorkWeek {
+  FIVE_DAY
+  SIX_DAY
+}
+
+enum OvertimePayableBasis {
+  PLAN_REALIZATION
+  PLAN_REALIZATION_PUNCH
+}
+
+enum OtReconStatus {
+  PENDING_PLAN
+  MATCHED
+  EXCEEDS_PLAN
+  NO_PLAN
+  PUNCH_MISMATCH
+  CANCELLED
+}
+
+enum SimulationTarget {
+  OVERTIME
+  ATTENDANCE
+}
+
+enum SimulationStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+enum OdooSyncStatus {
+  PENDING
+  SYNCED
+  FAILED
+}
+
+enum PayrollPeriodStatus {
+  OPEN
+  FROZEN
+  PUSHED
+}
+
+enum LeaveKind {
+  ANNUAL
+  SICK
+  UNPAID
+  OTHER
+}
+
+enum AccrualMode {
+  NONE
+  ANNIVERSARY // saldo baru diberikan setiap anniversary masa kerja
+}
+
+// ============================================================================
+// ORGANISASI & KARYAWAN (master di Odoo)
+// ============================================================================
+
+model WorkLocation {
+  id                   String       @id @default(uuid())
+  code                 String       @unique
+  name                 String
+  type                 LocationType
+  timezone             String       @default("Asia/Jakarta") // Asia/Jakarta (WIB), Asia/Makassar (WITA), Asia/Jayapura (WIT)
+  latitude             Decimal?     @db.Decimal(9, 6)
+  longitude            Decimal?     @db.Decimal(9, 6)
+  geofenceRadiusMeters Int?
+  isActive             Boolean      @default(true)
+  createdAt            DateTime     @default(now()) @db.Timestamptz
+  updatedAt            DateTime     @updatedAt @db.Timestamptz
+
+  employees       OdooEmployee[]
+  attendanceRules AttendanceRule[]
+  overtimeRules   OvertimeRule[]
+  calendarEvents  CalendarEvent[]
+  devices         Device[]
+}
+
+model OdooEmployee {
+  id           String         @id @default(uuid())
+  odooId       Int            @unique
+  nik          String?        @unique
+  name         String
+  email        String?
+  jobTitle     String?
+  jobGrade     String?
+  // Tanggal mulai kerja: dasar masa kerja, anniversary, dan pemberian saldo cuti
+  hireDate     DateTime?      @db.Date
+  isActive     Boolean        @default(true)
+  // Self-relation ke manager (merujuk odooId manager)
+  parentOdooId Int?
+  manager      OdooEmployee?  @relation("EmployeeManager", fields: [parentOdooId], references: [odooId])
+  subordinates OdooEmployee[] @relation("EmployeeManager")
+
+  workLocationId String
+  workLocation   WorkLocation @relation(fields: [workLocationId], references: [id])
+
+  lastSyncedAt DateTime? @db.Timestamptz
+  createdAt    DateTime  @default(now()) @db.Timestamptz
+  updatedAt    DateTime  @updatedAt @db.Timestamptz
+
+  user                 User?
+  contracts            OdooContract[]
+  schedules            EmployeeSchedule[]
+  timeEntries          TimeEntry[]
+  rawPunches           AttendanceRawPunch[]
+  attendanceLogs       AttendanceLog[]
+  attendanceDaily      AttendanceDaily[]
+  deviceMappings       EmployeeDeviceMap[]
+  leaveRequests        LeaveRequest[]
+  overtimeRequests     OvertimeRequest[]
+  overtimeRealizations OvertimeRealization[]
+  prePayrollResults    PrePayrollResult[]
+  pendingAdjustments   PendingAdjustment[]
+
+  @@index([workLocationId])
+}
+
+// Hasil sync hr.contract. Dipakai mode PRO_RATA dan hitung lembur (upah per jam = wage/173).
+model OdooContract {
+  id             String       @id @default(uuid())
+  odooContractId Int          @unique
+  odooEmployeeId String
+  employee       OdooEmployee @relation(fields: [odooEmployeeId], references: [id])
+  wage           Decimal      @db.Decimal(15, 2)
+  dateStart      DateTime     @db.Date
+  dateEnd        DateTime?    @db.Date
+  isActive       Boolean      @default(true)
+  syncedAt       DateTime     @default(now()) @db.Timestamptz
+
+  @@index([odooEmployeeId, dateStart])
+}
+
+// ============================================================================
+// AUTH & RBAC
+// ============================================================================
+
+model User {
+  id             String        @id @default(uuid())
+  email          String        @unique
+  passwordHash   String
+  isActive       Boolean       @default(true)
+  lastLoginAt    DateTime?     @db.Timestamptz
+  odooEmployeeId String?       @unique
+  employee       OdooEmployee? @relation(fields: [odooEmployeeId], references: [id])
+  createdAt      DateTime      @default(now()) @db.Timestamptz
+  updatedAt      DateTime      @updatedAt @db.Timestamptz
+
+  roles     UserRole[]
+  overrides UserPermissionOverride[]
+  auditLogs AuditLog[]
+}
+
+model Role {
+  id          String  @id @default(uuid())
+  code        String  @unique
+  name        String
+  description String?
+  isSystem    Boolean @default(false)
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+// Menu tree. Menu tampil bila user punya requiredPermission (jika diisi).
+model Menu {
+  id                   String      @id @default(uuid())
+  code                 String      @unique
+  label                String
+  path                 String?
+  icon                 String?
+  sortOrder            Int         @default(0)
+  parentId             String?
+  parent               Menu?       @relation("MenuTree", fields: [parentId], references: [id])
+  children             Menu[]      @relation("MenuTree")
+  requiredPermissionId String?
+  requiredPermission   Permission? @relation("MenuRequiredPermission", fields: [requiredPermissionId], references: [id])
+  isActive             Boolean     @default(true)
+
+  rolePermissions RolePermission[]
+}
+
+// Permission atomik, mis. attendance.log.read, config.overtime.simulate
+model Permission {
+  id          String  @id @default(uuid())
+  code        String  @unique
+  module      String
+  description String?
+
+  rolePermissions RolePermission[]
+  overrides       UserPermissionOverride[]
+  menusRequiring  Menu[]                   @relation("MenuRequiredPermission")
+
+  @@index([module])
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  assignedAt DateTime @default(now()) @db.Timestamptz
+
+  @@id([userId, roleId])
+}
+
+// ASSUMPTION: menuId + flag CRUD dipertahankan sesuai requirement; permission atomik
+// adalah sumber kebenaran untuk RbacGuard, flag CRUD dipakai UI per menu.
+model RolePermission {
+  id           String     @id @default(uuid())
+  roleId       String
+  permissionId String
+  menuId       String?
+  canCreate    Boolean    @default(false)
+  canRead      Boolean    @default(true)
+  canUpdate    Boolean    @default(false)
+  canDelete    Boolean    @default(false)
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  menu         Menu?      @relation(fields: [menuId], references: [id])
+
+  @@unique([roleId, permissionId, menuId])
+  @@index([permissionId])
+}
+
+// Prioritas evaluasi: explicit deny > explicit allow > role
+model UserPermissionOverride {
+  id           String     @id @default(uuid())
+  userId       String
+  permissionId String
+  isAllowed    Boolean
+  reason       String?
+  expiresAt    DateTime?  @db.Timestamptz
+  createdBy    String?
+  createdAt    DateTime   @default(now()) @db.Timestamptz
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, permissionId])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  action     String // mis. RULE_VERSION_CREATED, PERMISSION_OVERRIDE_SET, PAYROLL_FROZEN
+  entityType String
+  entityId   String
+  beforeJson Json?
+  afterJson  Json?
+  meta       Json? // mis. simulationId yang mendahului perubahan rule
+  createdAt  DateTime @default(now()) @db.Timestamptz
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ============================================================================
+// ATURAN ABSENSI (Dual Location Rules Engine)
+// ============================================================================
+
+model AttendanceRule {
+  id             String       @id @default(uuid())
+  workLocationId String
+  workLocation   WorkLocation @relation(fields: [workLocationId], references: [id])
+  effectiveFrom  DateTime     @db.Date
+  effectiveTo    DateTime?    @db.Date
+
+  // Toleransi keterlambatan: masuk setelah shiftStart + grace dianggap terlambat
+  gracePeriodMinutes Int @default(0)
+
+  // Jendela penerimaan punch relatif terhadap shift
+  preShiftWindowMinutes  Int @default(240)
+  postShiftWindowMinutes Int @default(360)
+
+  updatedBy String?
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([workLocationId, effectiveFrom])
+  @@index([workLocationId, effectiveFrom, effectiveTo])
+}
+
+// ============================================================================
+// JADWAL, SHIFT, KALENDER
+// ============================================================================
+
+model Shift {
+  id              String  @id @default(uuid())
+  code            String  @unique // dicocokkan dengan kode shift di file
+  name            String
+  startTime       String // "16:00", waktu lokal lokasi
+  durationMinutes Int // 480; menggantikan endTime (menghilangkan ambiguitas "24:00")
+  breakMinutes    Int     @default(60)
+  isActive        Boolean @default(true)
+
+  schedules   EmployeeSchedule[]
+  timeEntries TimeEntry[]
+}
+
+model EmployeeSchedule {
+  id             String       @id @default(uuid())
+  odooEmployeeId String
+  employee       OdooEmployee @relation(fields: [odooEmployeeId], references: [id])
+  workDate       DateTime     @db.Date // anchor untuk payroll & laporan
+  dayType        DayType
+  shiftId        String?
+  shift          Shift?       @relation(fields: [shiftId], references: [id])
+  // Disimpan, bukan dihitung ulang dari template, agar jadwal lampau tidak berubah
+  shiftStart     DateTime?    @db.Timestamptz
+  shiftEnd       DateTime?    @db.Timestamptz
+  source         DataSource
+  importBatchId  String?
+  importBatch    ImportBatch? @relation(fields: [importBatchId], references: [id])
+  updatedAt      DateTime     @updatedAt @db.Timestamptz
+
+  @@unique([odooEmployeeId, workDate])
+  @@index([workDate])
+}
+
+model CalendarEvent {
+  id             String            @id @default(uuid())
+  externalRef    String?           @unique
+  eventType      CalendarEventType
+  scope          EventScope
+  workLocationId String?
+  workLocation   WorkLocation?     @relation(fields: [workLocationId], references: [id])
+  odooEmployeeId String?
+  startDate      DateTime          @db.Date
+  endDate        DateTime          @db.Date
+  cancelsWorkday Boolean
+  skipGeofence   Boolean           @default(false)
+  name           String
+  importBatchId  String?
+  importBatch    ImportBatch?      @relation(fields: [importBatchId], references: [id])
+
+  @@index([startDate, endDate])
+}
+
+// ============================================================================
+// IMPOR FILE TEKS
+// ============================================================================
+
+model ImportBatch {
+  id          String         @id @default(uuid())
+  fileType    ImportFileType
+  fileName    String
+  fileHash    String
+  status      ImportStatus   @default(RECEIVED)
+  totalRows   Int            @default(0)
+  successRows Int            @default(0)
+  errorRows   Int            @default(0)
+  uploadedBy  String?
+  createdAt   DateTime       @default(now()) @db.Timestamptz
+  finishedAt  DateTime?      @db.Timestamptz
+  startedAt   DateTime?      @db.Timestamptz
+  progress    Int            @default(0)
+
+  errors               ImportRowError[]
+  logs                 ProcessLog[]
+  timeEntries          TimeEntry[]
+  schedules            EmployeeSchedule[]
+  calendarEvents       CalendarEvent[]
+  leaveRequests        LeaveRequest[]
+  overtimeRealizations OvertimeRealization[]
+}
+
+model ImportRowError {
+  id        String      @id @default(uuid())
+  batchId   String
+  batch     ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  rowNumber Int
+  rawLine   String
+  message   String
+
+  @@index([batchId])
+}
+
+// ============================================================================
+// ABSENSI: PUNCH MENTAH -> LOG -> HARIAN
+// ============================================================================
+
+// ASSUMPTION: vendor mesin belum ditentukan (poin terbuka 11.9)
+model Device {
+  id             String       @id @default(uuid())
+  serialNumber   String       @unique
+  vendor         String?
+  name           String
+  workLocationId String
+  workLocation   WorkLocation @relation(fields: [workLocationId], references: [id])
+  isActive       Boolean      @default(true)
+
+  mappings   EmployeeDeviceMap[]
+  rawPunches AttendanceRawPunch[]
+}
+
+// Mapping PIN / enroll ID mesin ke karyawan
+model EmployeeDeviceMap {
+  id             String       @id @default(uuid())
+  deviceId       String
+  device         Device       @relation(fields: [deviceId], references: [id])
+  enrollId       String
+  odooEmployeeId String
+  employee       OdooEmployee @relation(fields: [odooEmployeeId], references: [id])
+
+  @@unique([deviceId, enrollId])
+}
+
+// Immutable: tidak pernah di-update setelah insert
+model AttendanceRawPunch {
+  id             String         @id @default(uuid())
+  odooEmployeeId String?
+  employee       OdooEmployee?  @relation(fields: [odooEmployeeId], references: [id])
+  deviceId       String?
+  device         Device?        @relation(fields: [deviceId], references: [id])
+  enrollId       String?
+  punchAt        DateTime       @db.Timestamptz
+  direction      PunchDirection @default(UNKNOWN)
+  source         PunchSource    @default(FINGERPRINT)
+  // Fingerprint webhook untuk idempotensi (hash device+enroll+punchAt)
+  fingerprint    String         @unique
+  payloadJson    Json?
+  receivedAt     DateTime       @default(now()) @db.Timestamptz
+
+  logs AttendanceLog[]
+
+  @@index([odooEmployeeId, punchAt])
+}
+
+// Hasil assignment punch ke shift/workDate. Idempoten, boleh dihitung ulang.
+// ASSUMPTION: relasi final dengan AttendanceRawPunch/AttendanceDaily ditentukan di sini
+// (satu raw punch -> paling banyak satu log aktif).
+model AttendanceLog {
+  id             String             @id @default(uuid())
+  odooEmployeeId String
+  employee       OdooEmployee       @relation(fields: [odooEmployeeId], references: [id])
+  rawPunchId     String             @unique
+  rawPunch       AttendanceRawPunch @relation(fields: [rawPunchId], references: [id])
+  workDate       DateTime           @db.Date
+  direction      PunchDirection
+  punchAt        DateTime           @db.Timestamptz
+  isValid        Boolean            @default(true)
+  invalidReason  String?
+  assignedAt     DateTime           @default(now()) @db.Timestamptz
+
+  @@index([odooEmployeeId, workDate])
+}
+
+model AttendanceDaily {
+  id             String           @id @default(uuid())
+  odooEmployeeId String
+  employee       OdooEmployee     @relation(fields: [odooEmployeeId], references: [id])
+  workDate       DateTime         @db.Date
+  status         AttendanceStatus
+  clockIn        DateTime?        @db.Timestamptz // timestamp asli, tidak dinormalisasi
+  clockOut       DateTime?        @db.Timestamptz
+  isLate         Boolean          @default(false)
+  lateMinutes    Int              @default(0)
+
+  overtimeDetectedMinutes Int @default(0)
+  overtimeApprovedMinutes Int @default(0)
+  overtimePayableMinutes  Int @default(0)
+
+  appliedRuleId String? // snapshot rule untuk audit
+  computedAt    DateTime @default(now()) @db.Timestamptz
+
+  @@unique([odooEmployeeId, workDate])
+  @@index([workDate])
+}
+
+model LeaveRequest {
+  id              String        @id @default(uuid())
+  externalRef     String?       @unique
+  odooEmployeeId  String
+  employee        OdooEmployee  @relation(fields: [odooEmployeeId], references: [id])
+  kind            LeaveKind     @default(ANNUAL)
+  odooLeaveTypeId Int?
+  startDate       DateTime      @db.Date
+  endDate         DateTime      @db.Date
+  days            Decimal       @db.Decimal(5, 2)
+  reason          String?
+  source          DataSource    @default(PEOPLEHUB)
+  // Approval dijalankan di Odoo; PeopleHub hanya menyimpan status hasilnya
+  overallStatus   RequestStatus @default(PENDING)
+  importBatchId   String?
+  importBatch     ImportBatch?  @relation(fields: [importBatchId], references: [id])
+  createdAt       DateTime      @default(now()) @db.Timestamptz
+  updatedAt       DateTime      @updatedAt @db.Timestamptz
+
+  @@index([odooEmployeeId, startDate, endDate])
+  @@index([overallStatus])
+}
+
+// ============================================================================
+// LEMBUR
+// ============================================================================
+
+model OvertimeRequest {
+  id             String        @id @default(uuid())
+  externalRef    String?       @unique
+  odooEmployeeId String
+  employee       OdooEmployee  @relation(fields: [odooEmployeeId], references: [id])
+  workDate       DateTime      @db.Date
+  plannedStart   DateTime      @db.Timestamptz
+  plannedEnd     DateTime      @db.Timestamptz
+  reason         String
+  source         DataSource    @default(PEOPLEHUB)
+  overallStatus  RequestStatus @default(PENDING)
+  createdAt      DateTime      @default(now()) @db.Timestamptz
+
+  realizations OvertimeRealization[]
+
+  @@index([odooEmployeeId, workDate])
+}
+
+model OvertimeRealization {
+  id                   String                @id @default(uuid())
+  externalRef          String                @unique
+  odooEmployeeId       String
+  employee             OdooEmployee          @relation(fields: [odooEmployeeId], references: [id])
+  workDate             DateTime              @db.Date
+  actualStart          DateTime              @db.Timestamptz
+  actualEnd            DateTime              @db.Timestamptz
+  planExternalRef      String?
+  overtimeRequestId    String?
+  overtimeRequest      OvertimeRequest?      @relation(fields: [overtimeRequestId], references: [id])
+  reconciliationStatus OtReconStatus         @default(PENDING_PLAN)
+  payableMinutes       Int?
+  appliedBasis         OvertimePayableBasis? // snapshot mode saat dihitung
+  appliedRuleId        String? // snapshot rule untuk audit
+  importBatchId        String
+  importBatch          ImportBatch           @relation(fields: [importBatchId], references: [id])
+
+  @@index([odooEmployeeId, workDate])
+  @@index([reconciliationStatus])
+}
+
+model OvertimeRule {
+  id             String       @id @default(uuid())
+  workLocationId String
+  workLocation   WorkLocation @relation(fields: [workLocationId], references: [id])
+  effectiveFrom  DateTime     @db.Date
+  effectiveTo    DateTime?    @db.Date
+
+  workWeekPattern       WorkWeek
+  payableBasis          OvertimePayableBasis @default(PLAN_REALIZATION)
+  punchToleranceMinutes Int                  @default(15)
+  minMinutes            Int                  @default(30)
+  roundingMinutes       Int                  @default(30)
+  maxMinutesPerDay      Int                  @default(240)
+  maxMinutesPerWeek     Int                  @default(1080)
+  // {"WORKDAY":[{fromHour,toHour,multiplier}], "OFFDAY_HOLIDAY":[...]} — wajib divalidasi HR/legal
+  multiplierTiersJson   Json
+  excludedJobGrades     String[]
+
+  updatedBy String?
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([workLocationId, effectiveFrom])
+}
+
+// ============================================================================
+// SIMULASI DAMPAK RULE
+// ============================================================================
+
+model RuleSimulation {
+  id             String           @id @default(uuid())
+  ruleType       SimulationTarget
+  workLocationId String
+  periodStart    DateTime         @db.Date
+  periodEnd      DateTime         @db.Date
+  baselineRuleId String // untuk peringatan jika rule aktif berubah setelah simulasi
+  draftRuleJson  Json
+  status         SimulationStatus @default(QUEUED)
+  progressPct    Int              @default(0)
+  summaryJson    Json?
+  errorMessage   String?
+  requestedBy    String
+  createdAt      DateTime         @default(now()) @db.Timestamptz
+  expiresAt      DateTime         @db.Timestamptz
+
+  details RuleSimulationDetail[]
+
+  @@index([expiresAt])
+}
+
+// Hanya karyawan yang punya selisih yang disimpan
+model RuleSimulationDetail {
+  id              String         @id @default(uuid())
+  simulationId    String
+  simulation      RuleSimulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  odooEmployeeId  String
+  baselineMinutes Int
+  draftMinutes    Int
+  baselineAmount  Decimal?       @db.Decimal(15, 2)
+  draftAmount     Decimal?       @db.Decimal(15, 2)
+  affectedDays    Json // workDate yang berubah + alasan
+
+  @@index([simulationId])
+}
+
+// ============================================================================
+// PRE-PAYROLL
+// ============================================================================
+
+// ASSUMPTION: cut-off dan format periode belum final (poin terbuka 11.8)
+model PayrollPeriod {
+  id        String              @id @default(uuid())
+  code      String              @unique // mis. "2026-10"
+  startDate DateTime            @db.Date
+  endDate   DateTime            @db.Date
+  status    PayrollPeriodStatus @default(OPEN)
+  frozenAt  DateTime?           @db.Timestamptz
+  frozenBy  String?
+
+  results     PrePayrollResult[]
+  adjustments PendingAdjustment[]
+}
+
+model PrePayrollResult {
+  id             String        @id @default(uuid())
+  odooEmployeeId String
+  employee       OdooEmployee  @relation(fields: [odooEmployeeId], references: [id])
+  periodId       String
+  period         PayrollPeriod @relation(fields: [periodId], references: [id])
+
+  totalLateDeduction   Decimal @default(0) @db.Decimal(15, 2) // kode Odoo: LATE_DED
+  totalUnpaidDeduction Decimal @default(0) @db.Decimal(15, 2) // kode Odoo: ABS_DED
+  netDeductionAmount   Decimal @default(0) @db.Decimal(15, 2) // = late + unpaid; TIDAK termasuk lembur
+
+  // Pendapatan lembur dipisah dari potongan
+  totalOvertimeMinutes  Int      @default(0)
+  totalOvertimePay      Decimal? @db.Decimal(15, 2) // ASSUMPTION: nominal vs jam per tier belum final
+  overtimeBreakdownJson Json?
+
+  isFrozen Boolean   @default(false)
+  frozenAt DateTime? @db.Timestamptz
+
+  odooSyncStatus      OdooSyncStatus @default(PENDING)
+  odooSyncError       String?
+  odooPayslipInputIds Json? // id hr.payslip.input hasil push, untuk idempotensi
+  odooSyncedAt        DateTime?      @db.Timestamptz
+
+  createdAt DateTime @default(now()) @db.Timestamptz
+  updatedAt DateTime @updatedAt @db.Timestamptz
+
+  @@unique([odooEmployeeId, periodId])
+  @@index([periodId, isFrozen])
+}
+
+// Perubahan data untuk tanggal di periode frozen -> dibawa ke periode berikutnya
+model PendingAdjustment {
+  id                   String        @id @default(uuid())
+  odooEmployeeId       String
+  employee             OdooEmployee  @relation(fields: [odooEmployeeId], references: [id])
+  sourcePeriodId       String
+  sourcePeriod         PayrollPeriod @relation(fields: [sourcePeriodId], references: [id])
+  workDate             DateTime      @db.Date
+  reason               String
+  deltaLateDeduction   Decimal       @default(0) @db.Decimal(15, 2)
+  deltaOvertimeMinutes Int           @default(0)
+  appliedPeriodId      String?
+  createdAt            DateTime      @default(now()) @db.Timestamptz
+
+  @@index([appliedPeriodId])
+}
+
+// ============================================================================
+// TIME ENTRIES (inbound/outbound CSV)
+// ============================================================================
+
+// Satu baris = satu rentang waktu kerja karyawan. Format CSV:
+// employee_number (NIK), start_datetime, end_datetime, work_schedule (kode shift), payroll_period (YYYY-MM)
+// ASSUMPTION: entri hasil impor disimpan terpisah dan belum memengaruhi AttendanceDaily.
+model TimeEntry {
+  id             String       @id @default(uuid())
+  odooEmployeeId String
+  employee       OdooEmployee @relation(fields: [odooEmployeeId], references: [id])
+  startAt        DateTime     @db.Timestamptz
+  endAt          DateTime     @db.Timestamptz
+  workDate       DateTime     @db.Date // tanggal lokal dari startAt
+  shiftId        String?
+  shift          Shift?       @relation(fields: [shiftId], references: [id])
+  workSchedule   String? // kode shift apa adanya dari file
+  durationHours  Decimal      @default(0) @db.Decimal(6, 2) // durasi dalam JAM (dari file, atau selisih end-start)
+  payrollPeriod  String // 'YYYY-MM'
+  source         DataSource   @default(IMPORT)
+  importBatchId  String?
+  importBatch    ImportBatch? @relation(fields: [importBatchId], references: [id])
+  createdAt      DateTime     @default(now()) @db.Timestamptz
+  updatedAt      DateTime     @updatedAt @db.Timestamptz
+
+  @@unique([odooEmployeeId, startAt])
+  @@index([payrollPeriod])
+  @@index([workDate])
+}
+
+// Log status proses (ditampilkan di halaman Process Monitor)
+model ProcessLog {
+  id        String      @id @default(uuid())
+  seq       Int         @default(autoincrement()) // urutan pasti walau dicatat pada milidetik yang sama
+  batchId   String
+  batch     ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  level     LogLevel    @default(INFO)
+  message   String
+  createdAt DateTime    @default(now()) @db.Timestamptz
+
+  @@index([batchId, createdAt])
+}
+
+// ============================================================================
+// ATURAN CUTI (custom rule per jenis cuti, berversi)
+// ============================================================================
+
+// Satu baris = satu versi aturan untuk satu jenis cuti (mis. ANNUAL).
+//  - minTenureMonths: karyawan dengan masa kerja lebih pendek TIDAK boleh mengambil jenis cuti ini.
+//  - accrualMode ANNIVERSARY: setiap anniversary masa kerja (mulai ke-firstGrantAnniversary)
+//    karyawan mendapat saldo baru sebesar entitlementDays; kedaluwarsa expiryMonths setelahnya.
+// ASSUMPTION: masa kerja diukur pada tanggal mulai cuti; saldo dihitung dari aturan yang berlaku
+// pada tanggal pemberian (perubahan aturan tidak menulis ulang riwayat).
+model LeaveRule {
+  id                    String      @id @default(uuid())
+  leaveKind             LeaveKind
+  effectiveFrom         DateTime    @db.Date
+  effectiveTo           DateTime?   @db.Date
+  minTenureMonths       Int         @default(0)
+  accrualMode           AccrualMode @default(NONE)
+  entitlementDays       Decimal?    @db.Decimal(5, 2)
+  firstGrantAnniversary Int         @default(1)
+  expiryMonths          Int? // null = saldo tidak kedaluwarsa
+  updatedBy             String?
+  createdAt             DateTime    @default(now()) @db.Timestamptz
+  updatedAt             DateTime    @updatedAt @db.Timestamptz
+
+  @@unique([leaveKind, effectiveFrom])
+}
