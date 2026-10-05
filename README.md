@@ -100,4 +100,56 @@ Hapus data contoh: `npm run sample:reset` (di folder `peoplehub`).
 | Web menampilkan "fetch failed" atau halaman error | API belum berjalan. Jalankan `npm start` di folder `peoplehub`, dan pastikan `API_URL` di `peoplehub-web/.env.local` benar. |
 | `EADDRINUSE` / port sudah dipakai | Ubah `PORT` di `peoplehub/.env`, atau port web dengan `npx next dev -p <port>` (lalu sesuaikan `API_URL` bila port API berubah). |
 | Login ditolak | Cara A: pastikan `db:seed` sudah dijalankan dan sesuai `SEED_ADMIN_*` di `.env`. |
+
+---
+
+## 👥 Pengembangan Tim
+
+Repo: https://github.com/sabanilahir/peoplehub
+
+### Clone Repository
+```bash
+git clone https://github.com/sabanilahir/peoplehub.git
+cd peoplehub
+```
+
+### Setup untuk Developer Baru
+```bash
+# Backend
+cd peoplehub
+cp .env.example .env
+# Edit .env - sesuaikan DATABASE_URL dengan konfigurasi PostgreSQL Anda
+npm install
+npx prisma migrate deploy
+npm run db:seed
+
+# Frontend
+cd ../peoplehub-web
+cp .env.local.example .env.local
+npm install
+```
+
+### Workflow Development
+```bash
+# 1. Pull sebelum mulai kerja
+git pull origin main
+
+# 2. Buat branch untuk fitur
+git checkout -b fitur/nama-fitur
+
+# 3. Development...
+
+# 4. Commit & push
+git add .
+git commit -m "feat: deskripsi fitur"
+git push origin fitur/nama-fitur
+
+# 5. Buat Pull Request di GitHub untuk review
+```
+
+### Catatan Penting
+- **JWT_SECRET** dan **PUNCH_API_KEY** harus sama antar semua developer
+- Setiap developer punya **database PostgreSQL lokal sendiri**
+- Schema sync via `npx prisma migrate dev` (lalu push) atau `npx prisma migrate deploy`
+- Jangan pernah commit file `.env` atau `.env.local`
 | Rekap Absensi kosong | Pilih rentang 1–30 September 2026; data contoh hanya untuk bulan itu. |
