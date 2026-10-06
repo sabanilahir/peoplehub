@@ -45,7 +45,7 @@ const ICONS: Record<string, LucideIcon> = {
   "clipboard-check": ClipboardCheck,
   fingerprint: Fingerprint,
   "file-spreadsheet": FileSpreadsheet,
-  activity: Activity,
+  activity: Activity,\n  shield: Shield,\n  "shield-check": ShieldCheck,\n  "user-cog": UserCog,\n  list: List,
 };
 
 function Icon({ name }: { name: string | null }) {
@@ -135,3 +135,4 @@ export function Sidebar({ menu }: { menu: MenuNode[] }) {
     </>
   );
 }
+
