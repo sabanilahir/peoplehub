@@ -11,28 +11,26 @@ import {
   FileSpreadsheet,
   Fingerprint,
   Inbox,
-  type LucideIcon,
+  List,
   MapPin,
   Menu as MenuIcon,
   Moon,
   Plane,
   Settings,
-  Timer,
-  Upload,
-  Users,
-  Fingerprint,
-  List,
   Shield,
   ShieldCheck,
+  Timer,
+  Upload,
   UserCog,
+  Users,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import type { MenuNode } from "@/lib/api";
 
-// Nama ikon dikirim API sebagai string (kolom Menu.icon)
 const ICONS: Record<string, LucideIcon> = {
   database: Database,
   "map-pin": MapPin,
@@ -47,6 +45,7 @@ const ICONS: Record<string, LucideIcon> = {
   moon: Moon,
   settings: Settings,
   "alarm-clock": AlarmClock,
+  "clipboard-check": ClipboardCheck,
   fingerprint: Fingerprint,
   "file-spreadsheet": FileSpreadsheet,
   activity: Activity,
@@ -54,10 +53,6 @@ const ICONS: Record<string, LucideIcon> = {
   "shield-check": ShieldCheck,
   "user-cog": UserCog,
   list: List,
-  "clipboard-check": ClipboardCheck,
-  fingerprint: Fingerprint,
-  "file-spreadsheet": FileSpreadsheet,
-  activity: Activity,\n  shield: Shield,\n  "shield-check": ShieldCheck,\n  "user-cog": UserCog,\n  list: List,
 };
 
 function Icon({ name }: { name: string | null }) {
@@ -114,7 +109,6 @@ export function Sidebar({ menu }: { menu: MenuNode[] }) {
 
   return (
     <>
-      {/* Tombol menu untuk layar kecil */}
       <button
         type="button"
         onClick={() => setOpen(true)}
@@ -147,4 +141,3 @@ export function Sidebar({ menu }: { menu: MenuNode[] }) {
     </>
   );
 }
-
