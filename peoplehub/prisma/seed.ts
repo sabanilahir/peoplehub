@@ -75,6 +75,9 @@ async function main() {
     ['config.attendance', 'Absensi & Keterlambatan', '/config/attendance', 'alarm-clock', 1, 'config', 'config.attendance.read'],
     ['config.leave', 'Aturan Cuti', '/config/leave', 'plane', 3, 'config', 'leave.rule.read'],
     ['config.overtime', 'Lembur', '/config/overtime', 'moon', 2, 'config', 'config.overtime.read'],
+    ['rbac', 'RBAC Management', null, 'shield', 17, null, null],
+    ['rbac.all', 'Roles & Permissions', '/config/rbac', 'shield', 1, 'rbac', null],
+    ['import', 'Impor Data', '/import', 'upload', 20, null, 'import.batch.read'],
     ['import', 'Impor Data', '/import', 'upload', 20, null, 'import.batch.read'],
   ];
   const menuIds = new Map<string, string>();
